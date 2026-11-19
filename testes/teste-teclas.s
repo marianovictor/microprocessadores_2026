@@ -4,9 +4,7 @@ TABELA_7SEG:
     .byte 0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71
 
 .text
-/* ---------------------------------------------------------
- * ROTINA DE TRATAMENTO DE EXCECAO (Endereco 0x20)
- * --------------------------------------------------------- */
+/* TRATAMENTO DE EXCECAO  */
 .org 0x20
 RTI:
     rdctl et, ipending          /* Le as interrupcoes de hardware pendentes */
@@ -14,7 +12,7 @@ RTI:
 
     subi  ea, ea, 4             /* Decrementa ea em 4 (obrigatorio para interrupcao de hardware) */
 
-    andi  r13, et, 0x2          /* Verifica se a interrupcao veio da IRQ1 (pushbuttons) */
+    andi  r13, et, 0x2          /* Verifica se a interrupcao veio dos pushbuttons */
     beq   r13, r0, FIM_RTI
 
     call  EXT_IRQ1              /* Chama a sub-rotina de tratamento dos botoes */
@@ -68,9 +66,7 @@ MAIN:
     br    MAIN
 
 
-/* ---------------------------------------------------------
- * SUB-ROTINA DE INTERRUPCAO DOS PUSHBUTTONS (IRQ1)
- * --------------------------------------------------------- */
+/* INTERRUPCAO DOS PUSHBUTTONS*/
 EXT_IRQ1:
     movia r4, 0x1000005C        /* Endereco do Edge Capture dos botoes */
     ldwio r12, 0(r4)            /* Le qual botao gerou a interrupcao antes de limpar */
