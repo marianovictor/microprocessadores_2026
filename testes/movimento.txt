@@ -1,0 +1,323 @@
+!!!!CÓDIGO DE MOVIMENTO VERSÃO SIMULADOR - NÃO ESTÁ MODULARIZADO E PRECISA VER SE ESTÁ MUITO COMPLEXO!!!
+
+
+
+
+.data
+TABELA_7SEG:
+    .byte 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07
+    .byte 0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71
+
+/* Tabela de 32 bytes (0..F) sem vizinhos iguais para evitar repeticao */
+TABELA_ALEATORIA:
+    .byte 0x0A, 0x03, 0x0E, 0x01, 0x0C, 0x07, 0x0F, 0x04
+    .byte 0x09, 0x02, 0x0D, 0x06, 0x0B, 0x00, 0x08, 0x05
+    .byte 0x0E, 0x09, 0x04, 0x0F, 0x02, 0x0B, 0x06, 0x0D
+    .byte 0x01, 0x08, 0x03, 0x0C, 0x05, 0x0A, 0x00, 0x07
+
+.align 2
+ALVO_ATUAL:    .word 0          /* Ultimo digito sorteado (0..15) */
+INDICE_PRNG:   .word 0          /* Posicao atual na TABELA_ALEATORIA (0..31) */
+
+/* Flags de controle do Jogo */
+SORTEAR_NOVO:  .word 1          /* 1 = Gerar novo alvo e colocar no HEX7 */
+FLAG_MOVER:    .word 0          /* 1 = O Timer indicou que é hora de dar um "passo" */
+POSICAO_ALVO:  .word 7          /* Posicao atual do alvo (7 a 1) */
+ALVO_ATIVO:    .word 0          /* 1 = Existe alvo na tela movendo-se */
+
+/* ---------------------------------------------------------
+- VETOR DE RESET (Endereco 0x00000000)
+- --------------------------------------------------------- */
+.section .reset, "ax"
+    movia r2, _start
+    jmp   r2
+
+/* ---------------------------------------------------------
+- VETOR DE EXCECAO / INTERRUPCAO (Endereco 0x00000020)
+- --------------------------------------------------------- */
+.section .exceptions, "ax"
+.global RTI
+RTI:
+    subi  sp, sp, 24
+    stw   et, 0(sp)
+    rdctl et, ipending
+    beq   et, r0, FIM_RTI       /* Ignora se nao for interrupcao externa */
+
+    subi  ea, ea, 4             /* Ajuste obrigatorio para IRQ de hardware */
+    stw   ea, 4(sp)
+    stw   ra, 8(sp)
+    stw   r4, 12(sp)
+    stw   r5, 16(sp)
+    stw   r6, 20(sp)
+
+    /* Verifica IRQ 0 (Timer) */
+    andi  r4, et, 0x1
+    beq   r4, r0, CHECK_KEY
+    call  EXT_IRQ0
+
+CHECK_KEY:
+    /* Verifica IRQ 1 (Pushbuttons) */
+    andi  r4, et, 0x2
+    beq   r4, r0, RESTAURA
+    call  EXT_IRQ1
+
+RESTAURA:
+    ldw   ea, 4(sp)
+    ldw   ra, 8(sp)
+    ldw   r4, 12(sp)
+    ldw   r5, 16(sp)
+    ldw   r6, 20(sp)
+
+FIM_RTI:
+    ldw   et, 0(sp)
+    addi  sp, sp, 24
+    eret
+
+/* ---------------------------------------------------------
+- PROGRAMA PRINCIPAL
+- --------------------------------------------------------- */
+.text
+.global _start
+_start:
+    movia sp, 0x02000000        /* Inicializa pilha na SDRAM */
+
+    /* Apaga todos os displays inicialmente */
+    movia r4, 0x10000020
+    stwio r0, 0(r4)
+    movia r4, 0x10000030
+    stwio r0, 0(r4)
+
+    /* Configura Timer para 1,0s (Clock 50MHz = 0x02FAF080) e Habilita IRQ */
+    movia r4, 0x10002000
+    movui r5, 0xF080
+    stwio r5, 8(r4)             /* periodl (Low) */
+    movui r5, 0x02FA
+    stwio r5, 12(r4)            /* periodh (High) */
+    movi  r5, 0x7               /* START (1) | CONT (2) | ITO (4 - Interrupcao) */
+    stwio r5, 4(r4)
+
+    /* Habilita interrupcao apenas do KEY1 (bit 1 -> 0x2) */
+    movia r4, 0x1000005C
+    movi  r5, 0xF
+    stwio r5, 0(r4)             /* Limpa cliques antigos no Edge Capture */
+    movia r4, 0x10000058
+    movi  r5, 0x2
+    stwio r5, 0(r4)             /* interruptmask = KEY1 */
+
+    /* Habilita IRQ 0 (Timer) e IRQ 1 (Botoes) e PIE global no processador */
+    movi  r4, 0x3
+    wrctl ienable, r4
+    movi  r4, 0x1
+    wrctl status, r4
+
+MAIN:
+    /* 1. Espelha SW[17:14] continuamente no HEX0 sem apagar o restante (HEX3..1) */
+    movia r4, 0x10000040
+    ldwio r5, 0(r4)
+    srli  r5, r5, 14
+    andi  r5, r5, 0xF
+
+    movia r6, TABELA_7SEG
+    add   r6, r6, r5
+    ldbu  r6, 0(r6)             /* r6 tem o valor 7 segmentos da chave */
+
+    movia r4, 0x10000020
+    ldwio r7, 0(r4)             /* Lê displays HEX3 a HEX0 */
+    movia r8, 0xFFFFFF00        /* CORRECAO 1: Usa movia (32bits) para a mascara */
+    and   r7, r7, r8            /* Limpa APENAS o HEX0 mantendo os outros acesos */
+    or    r7, r7, r6            /* Insere o novo valor da chave no HEX0 */
+    stwio r7, 0(r4)
+
+    /* 2. Verifica se o usuario apertou o botao para sortear (SORTEAR_NOVO == 1) */
+    movia r4, SORTEAR_NOVO
+    ldw   r5, 0(r4)
+    beq   r5, r0, VERIFICA_MOVIMENTO
+    stw   r0, 0(r4)             /* Limpa a flag */
+    call  SORTEIA_ALVO
+
+VERIFICA_MOVIMENTO:
+    /* 3. Verifica se o Timer avisou que é hora de dar um passo (FLAG_MOVER == 1) */
+    movia r4, FLAG_MOVER
+    ldw   r5, 0(r4)
+    beq   r5, r0, MAIN
+    stw   r0, 0(r4)             /* Limpa a flag */
+    call  MOVE_ALVO
+    
+    br    MAIN
+
+/* ---------------------------------------------------------
+- SUB-ROTINA: SORTEIA_ALVO (Inicia o alvo na posicao HEX7)
+- --------------------------------------------------------- */
+SORTEIA_ALVO:
+    /* CORRECAO 3: Salva o endereco de retorno na pilha */
+    subi  sp, sp, 4
+    stw   ra, 0(sp)
+
+    /* Sorteia PRNG utilizando timer como "snap" */
+    movia r4, 0x10002010
+    stwio r0, 0(r4)
+    ldwio r5, 0(r4)
+
+    movia r4, INDICE_PRNG
+    ldw   r6, 0(r4)
+    add   r6, r6, r5
+    addi  r6, r6, 1
+    andi  r6, r6, 0x1F
+
+    movia r7, TABELA_ALEATORIA
+    add   r7, r7, r6
+    ldbu  r7, 0(r7)
+    andi  r7, r7, 0x0F
+
+    movia r8, ALVO_ATUAL
+    ldw   r9, 0(r8)
+    bne   r7, r9, NOVO_SORTEADO
+
+    /* Evitar repeticao (se foi igual ao ultimo alvo, avanca na tabela 1 posicao) */
+    addi  r6, r6, 1
+    andi  r6, r6, 0x1F
+    movia r7, TABELA_ALEATORIA
+    add   r7, r7, r6
+    ldbu  r7, 0(r7)
+    andi  r7, r7, 0x0F
+
+NOVO_SORTEADO:
+    stw   r6, 0(r4)             /* Salva INDICE_PRNG */
+    stw   r7, 0(r8)             /* Salva ALVO_ATUAL */
+
+    /* Define as configuracoes de exibicao e movimento inicial */
+    movia r4, POSICAO_ALVO
+    movi  r5, 7
+    stw   r5, 0(r4)             /* Inicia no HEX7 */
+
+    movia r4, ALVO_ATIVO
+    movi  r5, 1
+    stw   r5, 0(r4)             /* Marca como Ativo */
+
+    call  ATUALIZA_TELA         /* Desenha nos displays */
+    
+    /* CORRECAO 3: Restaura o endereco de retorno e libera a pilha */
+    ldw   ra, 0(sp)
+    addi  sp, sp, 4
+    ret
+
+/* ---------------------------------------------------------
+- SUB-ROTINA: MOVE_ALVO (Decrementa a posicao e atualiza)
+- --------------------------------------------------------- */
+MOVE_ALVO:
+    /* CORRECAO 3: Salva o endereco de retorno na pilha */
+    subi  sp, sp, 4
+    stw   ra, 0(sp)
+
+    movia r4, ALVO_ATIVO
+    ldw   r5, 0(r4)
+    beq   r5, r0, FIM_MOVE      /* Se nao ha alvo ativo, ignora */
+
+    movia r6, POSICAO_ALVO
+    ldw   r7, 0(r6)
+    subi  r7, r7, 1             /* Move 1 display para a direita */
+    stw   r7, 0(r6)
+
+    bgt   r7, r0, DESENHA       /* Se posicao > 0 (HEX1), desenha na tela. */
+
+    /* Se posicao chegou em 0 (HEX0), encerra (alvo sumiu/perdeu) */
+    stw   r0, 0(r4)             /* ALVO_ATIVO = 0 */
+
+DESENHA:
+    call  ATUALIZA_TELA
+
+FIM_MOVE:
+    /* CORRECAO 3: Restaura o endereco de retorno e libera a pilha */
+    ldw   ra, 0(sp)
+    addi  sp, sp, 4
+    ret
+
+/* ---------------------------------------------------------
+- SUB-ROTINA: ATUALIZA_TELA (Apaga displays antigos e escreve no atual)
+- --------------------------------------------------------- */
+ATUALIZA_TELA:
+    /* Apaga HEX7 a HEX4 */
+    movia r8, 0x10000030
+    stwio r0, 0(r8)
+
+    /* Apaga HEX3 a HEX1 (Mas preserva as entradas do SW no HEX0) */
+    movia r8, 0x10000020
+    ldwio r9, 0(r8)
+    andi  r9, r9, 0xFF          /* Mantem apenas o byte 0 (HEX0) */
+    stwio r9, 0(r8)
+
+    /* Confere se esta ativo. Se for = 0 (fim do mapa), ja apagamos e saimos. */
+    movia r10, ALVO_ATIVO
+    ldw   r10, 0(r10)
+    beq   r10, r0, FIM_ATUALIZA
+
+    /* Pega codigo 7 Seg do ALVO_ATUAL */
+    movia r10, ALVO_ATUAL
+    ldw   r10, 0(r10)
+    movia r11, TABELA_7SEG
+    add   r11, r11, r10
+    ldbu  r11, 0(r11)           /* r11 = formato 7 segmentos do numero sorteado */
+
+    /* Pega posicao (1 a 7) */
+    movia r10, POSICAO_ALVO
+    ldw   r10, 0(r10)
+
+    /* Decide qual banco de displays acessar: Alto (HEX4-7) ou Baixo (HEX1-3) */
+    subi  r12, r10, 4
+    blt   r12, r0, DISPLAY_BAIXO
+
+DISPLAY_ALTO:
+    /* r12 = Indice 0..3 (que equivalem ao HEX4..7) */
+    slli  r12, r12, 3           /* Multiplica por 8 para virar bit-shift (0, 8, 16, 24) */
+    sll   r11, r11, r12         /* Desloca para o byte correto */
+    movia r8, 0x10000030
+    stwio r11, 0(r8)
+    br    FIM_ATUALIZA
+
+DISPLAY_BAIXO:
+    /* r10 = Indice 1..3 (equivalentes ao HEX1..3) */
+    slli  r10, r10, 3           /* Multiplica por 8 */
+    sll   r11, r11, r10         /* Desloca para o byte correto */
+    movia r8, 0x10000020
+    ldwio r9, 0(r8)
+    or    r9, r9, r11           /* Une com o que sobrou (o HEX0) */
+    stwio r9, 0(r8)
+
+FIM_ATUALIZA:
+    ret
+
+/* ---------------------------------------------------------
+- ISR DO TIMER (IRQ 0)
+- --------------------------------------------------------- */
+EXT_IRQ0:
+    /* 1. Limpa Interrupcao / Reconhece o Timeout */
+    movia r4, 0x10002000
+    stwio r0, 0(r4)
+
+    /* 2. Aciona a flag pro loop principal mover o alvo */
+    movia r4, FLAG_MOVER
+    movi  r5, 1
+    stw   r5, 0(r4)
+
+    ret
+
+/* ---------------------------------------------------------
+- ISR DOS PUSHBUTTONS (IRQ 1 - KEY1)
+- --------------------------------------------------------- */
+EXT_IRQ1:
+    movia r4, 0x1000005C
+    ldwio r5, 0(r4)             /* Le Edge Capture */
+    movi  r6, 0xF
+    stwio r6, 0(r4)             /* Limpa Edge Capture escrevendo de volta */
+
+    andi  r6, r5, 0x2           /* Confere se o KEY1 (bit 1) foi o causador */
+    beq   r6, r0, FIM_EXT_IRQ1
+
+    /* Aciona o reinicio do alvo / novo sorteio */
+    movia r4, SORTEAR_NOVO
+    movi  r5, 1
+    stw   r5, 0(r4)
+
+FIM_EXT_IRQ1:
+    ret
+.end
